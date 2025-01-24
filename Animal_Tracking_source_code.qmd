@@ -1,0 +1,282 @@
+---
+title: "TAMS Animal Tracking Assignment"
+author: "Elizabeth Raphaels"
+format: 
+  html:
+    embed-resources: true
+    code-overflow: wrap
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Initiation
+
+Beginning the project load in packages needed and be sure to set your working directory
+
+```{r, warning = FALSE, message = FALSE}
+library(lubridate)
+library(tidyverse)
+library(patchwork)
+library(ozmaps)
+library(sf)
+library(remora)
+library(dplyr)
+
+setwd("C:/Users/lizzi/OneDrive/Documents/1. UNSW/Term 1 2024/TAMS/Week4 - Animal Tracking Prac")
+```
+
+read in required files
+
+```{r}
+detec <- read.csv("IMOS/Wharf/TAMS 2024 Detections.csv")
+rec <- read.csv("IMOS/IMOS_receiver_deployment_metadata.csv")
+trans <- read.csv("IMOS/IMOS_transmitter_deployment_metadata.csv")
+animal.meas <- read.csv("IMOS/IMOS_animal_measurements.csv")
+```
+
+# Question 1
+
+For the three bull sharks detected on the receiver used for our wharf experiment, please provide for each one of the individuals detected:
+
+## Tagging Size
+
+a)  Their respective sizes at tagging? What kind of measurements were these? (1 marks)
+
+We can filter through the animal measurements data frame to create a subsetted data frame of information only for our three individuals. The output for the code chunk below lists the total length (cm) of our three detected bullsharks.
+
+```{r}
+#use animal.meas dataset for the lengths
+#filter for just the rows where scientific name = bull shark and where the transmitter ID is our 3 transmitters of interest
+our.meas <- filter(animal.meas, transmitter_id %in% c('A69-9001-18754','A69-9001-18763','A69-9001-18752'))%>%
+  select(-c("comments", "transmitter_deployment_id"))
+print(our.meas)
+```
+
+## Location/Date
+
+b\. Their tagging locations and dates? (1.5 marks)
+
+The location and dates of tagging were noted from the animal tracking database website by searching the transmitter ids.
+
+| ID    | Locality in Syd. Harbour | Location     | Date       | Time (UTC) |
+|-------|--------------------------|--------------|------------|------------|
+| 18763 | Sow and Pigs Reef        | 151.27-33.84 | 2018-02-28 | 12:23      |
+| 18754 | Nielson Park             | 151.26-33.85 | 2018-02-15 | 11:31      |
+| 18752 | Birchgrove               | 151.18-33.85 | 2018-02-22 | 11:41      |
+
+# Question 2.
+
+How many bull sharks were detected inside of Sydney Harbour? What were their transmitter ids? Please provide the code and output.
+
+## Step 1.
+
+Utilise Remora to combine the datasets and do quality control.
+
+```{r, warning = FALSE, message = FALSE}
+x <- list(det = "IMOS/IMOS_detections.csv",
+        rmeta = "IMOS/IMOS_receiver_deployment_metadata.csv",
+        tmeta = "IMOS/IMOS_transmitter_deployment_metadata.csv",
+        meas = "IMOS/IMOS_animal_measurements.csv")
+#Using the remora quality control function to rank the validity of our data
+IMOS_QC <- runQC(x = x, 
+  .parallel = TRUE)
+
+#remove data with likely invalid, and valid quality control rankings using the grabQC function
+dQC <- grabQC(IMOS_QC,
+  what = c("dQC"),
+  flag = "all") %>%
+  filter(Detection_QC %in% c(1,2))
+```
+
+## Step 2.
+
+We can filter for detections and unique transmitter IDs that were detected in Sydney Harbour. See the code chunk output below for a list of the six transmitter IDs.
+
+```{r, warning=FALSE}
+#detections from sydney harbour. searching for installation name "Sydney Harbour" and "Chowder Bay" in the quality controlled dataset (dQC)
+
+SH <- filter (dQC, installation_name == c('Sydney Harbour', 'Chowder Bay')) %>%
+  mutate(date = as.Date(detection_datetime)) #change the column to date and hour formation instead of a string
+
+#can use unique() to find how many bull sharks there were and their transmitter ids
+ids <- unique(SH$transmitter_id)
+print(ids)
+```
+
+# Question 3
+
+Let’s have a look at the bull shark movements outside of Sydney Harbour during our study period. These are the installation names outside of Sydney Harbour: - IMOS-ATF Bondi Line - IMOS-ATF CTBAR - Botany Gate - IMOS-ATF Sydney Gate
+
+## Part a
+
+a)  How many bull sharks were detected outside of Sydney Harbour? When was their first and last detection? Please provide the code and output
+
+    10-sharks were detected outside of Sydney based on the number of unique transmitter IDs detected outside of the Harbour. See the code chunk output below for each individual's first and last detection date and time.
+
+```{r}
+#Using the quality controlled data set (dQC) we can select for detections with the installation names outside of syndey harbour 
+out.SH <- filter(dQC, installation_name %in% c('IMOS-ATF Bondi Line', 'IMOS_ATF CTBAR', 'Botany Gate', 'IMOS-ATF Sydney Gate'))%>%
+  mutate(date=as.Date(detection_datetime))
+
+#number of bullsharks detected outside the harbour
+num <- unique(out.SH$transmitter_id) #  unique transmitter IDS
+
+#To find the first and last detection dates we can make a new data frame with 3 columns, transmitter_id, first_detec, and last_detec using group_by and summarise functions
+det_dates <- out.SH %>%
+  group_by(transmitter_id)%>%
+  summarise(first_detec = min(detection_datetime),
+            last_detec = max(detection_datetime))
+#see output
+print(det_dates)
+                  
+```
+
+<!-- -->
+
+## Part b
+
+Plot the bull shark hourly percentage of detections outside of Sydney Harbour (similar to section 5 in our practical). Please provide the code used and the figure created.
+
+### Step. 1
+
+Visualise data to remove outliers to avoid skewing results
+
+```{r}
+#Should we remove any outliers to avoid skewing our results? 
+#create a new dataframe that includes number of detections per shark
+detections <- out.SH %>%
+      group_by(transmitter_id)%>%
+      summarise(detections = n()) #creates a new column with number of detections
+
+#create a bar plot 
+ggplot(data=detections, aes(x=transmitter_id, y=detections))+
+      geom_col() + 
+      labs(x='Transmitter ID', y='# of detections')+
+      theme(axis.text.x = element_text(angle=45)) #angles the column labels
+
+#individual A69-9001-12020 has very few detections compared to the other sharks- how may exactly?
+QC_tot <- out.SH %>%
+      group_by(transmitter_id) %>%
+      summarise(detections = n()) # number of total detections 
+print(QC_tot[5,2])
+
+#with only 9 detections, we should remove individual A69-9001-12020
+out.SH <- filter(out.SH, transmitter_id != 'A69-9001-12020')
+```
+
+### Step 2.
+
+Create a plot showing the hourly percentage of detections outside of Sydney Harbour
+
+```{r}
+#to our outside Sydney Habour data set we will calculate the hourly percent detections of sharks
+hour.percent <- out.SH %>%
+  mutate(date=as.Date(detection_datetime),
+         hour = as.numeric(format(detection_datetime, format="%H"))) %>% #column with hour of
+  group_by(date, hour, transmitter_id) %>%
+  summarise(detections=n())%>% #adds a column with number of detections in each hour
+  mutate(total.detections = sum(detections),
+  per.detec = (detections / total.detections) * 100)
+
+#plotting percent detections vs. hour of the day 
+plot.outside <- ggplot(data=hour.percent, aes(x=hour, y=per.detec))+
+  geom_smooth(method='loess', linewidth=1)+
+  xlab('Hour of the day')+
+  ylab('Percentage of detections (%)')+
+  ggtitle('Outside Sydney Harbour')
+print(plot.outside)
+```
+
+# Question 4
+
+By comparing the trends in the bull shark hourly percentage of detections inside (plot from section 5 in class) and outside (your answers from question 3) of Sydney Harbour, what do they suggest about bull shark space use in Sydney? How does intra-individual variation in space use affect these trends?
+
+Let's look at the detection plot from inside Sydney harbour compared to outside the harobur
+
+```{r, warning=FALSE}
+#creating the dataset with detections inside sydney harbour
+in.SH <- dQC %>%
+  filter(!(transmitter_id %in% c("A69-1303-64927", "A69-9001-12020", "A69-900120460")) & 
+    installation_name %in% c(
+      "Chowder Bay",
+      "Sydney Harbour")) %>% 
+  mutate(date = as.Date(detection_datetime),
+    hour = as.numeric(format(detection_datetime, format = "%H"))) %>%
+  group_by(date, hour, transmitter_id) %>%
+  summarise(detections = n()) %>% #count number of detections, how many detections per hour are representative 
+  mutate(total.detections = sum(detections),
+    perc.detections = (detections / total.detections) * 100)
+
+# Plot distribution of detections as a function of time of the day inside the harbour
+plot.inside<- ggplot(data = in.SH, aes(x = hour, y = perc.detections)) + 
+  geom_smooth(method = "loess", linewidth = 1) +
+  ggtitle('Inside Sydney Harbour')+
+  labs(x = "Hour of the day", y = "Percentage of detections (%)")
+
+#combine the plots
+plot.outside / plot.inside
+```
+
+The plots appear to be inverses of each other. Around 6 am, there are more shark detections inside Syndey Harbour compared to outside the harbour. This implies that sharks are most active inside the harbour during the early morning. As the day continues, the number of shark detections decrease inside of the harbour and increase outside of the harbour. At around 8pm the percent of detections peaks outside of the harbour, and after, the number increases inside of the harbour again. This seems to tell that there's a trend for bullsharks to frequent Sydney Harbour during the early morning, move outside of the harbour during the day and then return sometime at early evening/night.
+
+**How does intra-individual variation in space use affect these trends?**
+
+It may be interesting to see if the same individuals were found both inside the harbour and outside the harbour. Running the code chunk below, there are six individuals that were found both inside and outside the harbour. Looking at the transmitter ids, all of the sharks detected inside the harbour were found in outside as well; however, not all of the sharks outside of the harbour were detected inside. This highlights the intra-individual variations of shark movements - not all individuals will act the same, take the same routes. Therefore we cannot conclude that all bullsharks travel in and out of Sydney Harbour together at certain times of day.
+
+```{r}
+#create lists of the transmitter ids found inside and outside of the harbour
+ids.in <- unique(out.SH$transmitter_id)
+ids.out <- unique(in.SH$transmitter_id)
+
+#create a list of the transmitter ids found BOTH inside and outside of the harbour
+common <- intersect(ids.in, ids.out)
+
+#comparing the transmitter ids
+print(ids.in)
+print(ids.out)
+print(common)
+```
+
+# Question 5
+
+Given the trends observed in the plots from section 6 of our practical, and the literature on bull shark movements in Sydney and along the East Coast of Australia (included in the “Literature” folder), please answer the following questions considering the species ecology.
+
+## Part a
+
+a)Which shark(s) was (were) detected only in Queensland? What are the possible reasons why this(these) shark(s) behaved like that? (1 mark)
+
+```{r, warnings=FALSE}
+QC_broad <- dQC %>%
+  filter(!(transmitter_id %in% c("A69-1303-64927", "A69-9001-12020", "A69-900120460"))) %>%
+  mutate(date = as.Date(detection_datetime)) %>%
+  group_by(date, transmitter_id, installation_name) %>%
+  summarise(lat = mean(receiver_deployment_latitude),
+    lon = mean(receiver_deployment_longitude),
+    detections = n()) %>%
+  mutate(month = format(date, "%m")) #m for month M for minutes
+
+num <- unique(QC_broad$transmitter_id)
+
+# Load Australian shapefile for the plot
+oz_states <- ozmap_states
+
+# Plot distribution of detections as a function of time of the day
+ggplot() + theme_void() +
+  geom_sf(data = oz_states, fill = "gray", alpha = 0.5) +
+  coord_sf(ylim = c(-43, -10), xlim = c(140, 155)) +
+  geom_point(data = QC_broad, aes(x = lon, y = lat, colour = month, size = detections)) +
+  facet_wrap(~transmitter_id)+
+  theme(
+    plot.title = element_text(size = 5),
+    strip.text = element_text(size = 5))+
+  guides(size = guide_legend(override.aes = list(size = 1))) # Adjust the size of the legend key)
+```
+
+It looks like one shark, 20460, was only found in Queensland and not in NSW. As mentioned before, individual sharks can vary in their movements spatially and temporally. As in Niella 2020, bullshark distribution around the coast has been found to be influenced by temperature and a combination of Eastern Australia Current (EAC)direction and strength. The EAC in northern Queensland is considered the most consistent area of the current, and Queensland has warmer water temperatures, so perhaps this individual has a preference for warm water and a consistent, strong southward current.
+
+## Part b
+
+b)  What environmental variable is likely responsible for the seasonal changes in latitudinal movements observed, and why? (1.5 marks)
+
+Sea surface temperature is most likely responsible for these latitudinal seasonal movements. Looking at the plots above, there is a trend that bullsharks travel farther south in the summer months. Individuals are then seen farther north during the winter months. This coincides with waters in south NSW possibly being too cold in the winter for the bullsharks, below the proposed 22C threshold. However, come summer, the waters in south NSW can breach the threshold appearing more favorable to the sharks. Even our Queenslander individual follows this trend - detected in south Queenland during the summer months, but not the winter. Bullsharks may prefer certain temperature regimes for their own metabolic function or migrate following their prey and its preferences.
