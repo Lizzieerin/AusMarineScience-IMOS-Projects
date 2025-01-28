@@ -1,0 +1,420 @@
+---
+title: "Zooplankton Investigation"
+author: "Elizabeth Raphaels"
+format: 
+  html:
+    embed-resources: true
+    code-overflow: wrap
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Loading Packages
+
+```{r, results='hide', message = FALSE, warning = FALSE}
+#install.packages('insight', repos=https://easystats.r-universe.dev')
+library(tidyverse) 
+library(splines)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggeffects)
+library(insight)
+library(lubridate)
+library(patchwork)
+library(ecoCopula)
+library(ggrepel)
+library(mvabund)
+```
+
+# Part 1: Patterns in Zooplankton Distribution from the Continuous Plankton Recorder (CPR)
+
+## Reading in and Cleaning Data
+
+I'm interested in using some data from the IMOS CPR sampling done around Australia and in the Southern Ocean to examine trends in zooplankton One data set - IMOS-ZooplanktonCPR.csv contains counts of zooplankton taxa from different samples. This IMOS-Zooplankton Abundance and Biomass Index (CPR) Derived Indices.csv contains derived data such as the Shannon's diversity index of copepods in a sample or the Omnivore:Carnivore ratio of specifically copepods in a sample.
+
+```{r, results='hide', message = FALSE, warning = FALSE}
+#read in data
+zoop  <- read_csv("IMOS_-_ZooplanktonCPR.csv")
+zoop.index <- read.csv("IMOS_-_Zooplankton_Abundance_and_Biomass_Index_(CPR)-Derived_Indices.csv")
+
+#store metadata as a new dataframe and remove it from zoop
+meta.zoop <- zoop %>% select(1:17)
+
+zoop <- zoop %>% select(17:last_col())
+```
+
+## Visualising Dominant Taxa
+
+Examining the bar plot below - dominant groups sampled are Copepods, Cladocerans, and Appendicularians
+
+```{r, warning=FALSE, message=FALSE}
+#take the mean abundance of each taxa and pivot the dataframe into a longer format 
+taxaMean <- zoop %>% 
+  summarise(across(.fns = mean)) %>% 
+  pivot_longer(cols = 1:33, names_to = "Taxa", values_to = "Mean_Abundance")
+```
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(data = taxaMean, aes(x = Taxa, y = Mean_Abundance)) + 
+  geom_bar(stat = "identity") + # generate a bar plot
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_y_sqrt()+
+  ylab(bquote('Mean Abundance (ind.'~m^-3*')'))
+```
+
+## Simple Linear Model to Explain Variations in Abundance
+
+Does zooplankton abundance vary with latitude? First trying a **simple linear model** with zooplankton abundance and latitude as the response and predictor variables, respectively.
+
+```{r, warning=FALSE, message=FALSE}
+#Altering the dataframe to best visualise a scatterplot with latitude vs. zooplankton abundance   
+
+  #Step 1. Calculate the mean count per taxa in each sample, while replacing NA's with zeros for now 
+zoop <- zoop %>%    mutate_all(~replace(., is.na(.), 0))%>%   rowwise() %>%    mutate(Total_Abund = sum(across()))    
+
+  #Step 2. Since I want to log the abundance values, I need to handle the 0 values in the dataset. I will add a small number, in this case, half the minimum value, to everything
+min_val <- zoop %>%   select(Total_Abund) %>%   filter(Total_Abund>0)
+min_val <- min(min_val$Total_Abund)/2   
+
+  #Step 3. make a new column in the zoop data frame representing the logged values of zooplankton abundance 
+zoop <- zoop %>%   mutate(zoopAbund = log10(Total_Abund+min_val))    
+
+  #Step 4. Merge the zooplankton counts back with the metadata dataset containing latitude information of the samples 
+full_data <- bind_cols(meta.zoop, zoop)  
+
+  #Step 5. Make a linear model of Abundance as a function of latitude
+modelA <- lm(zoopAbund ~ Latitude, data=full_data) 
+ 
+
+  #Step 6. Make a scatterplot of the data and model
+ggplot(data=full_data, aes(x=Latitude, y=zoopAbund))+  
+  geom_point(alpha=0.5)+   theme_classic()+  
+  ggtitle('Zoooplankton Abundance varying with Latitude')+ 
+  ylab("Log10(Zooplankton Abundance)")+  
+  geom_smooth(method='lm')   
+
+#Step 7. Is the relationship significant? 
+summary(modelA) 
+
+```
+
+The model indicates a significant positive relationship between zooplankton abundance and latitude for the CPR samples (p\<2e-16, F=213.9). However, with an R-squared value of 0.0277, the model doesn't explain the variation in the data well. It might be interesting if there are two different relationships between north and south of 42 degrees south latitude
+
+```{r, warning=FALSE, message=FALSE}
+#Step 1. Separate the dataset into sampling done north and south of 42 degrees south.
+zoo_north <- full_data %>%   filter(Latitude > -42)  
+zoo_south <- full_data %>%   filter(Latitude< -42) 
+
+#Step 2. Linear models for the north and south datasets 
+modelS <- lm(zoopAbund ~ Latitude, data=zoo_south)
+modelN <- lm(zoopAbund ~ Latitude, data=zoo_north) 
+
+#Step 3. Add separate models onto our scatterplot 
+ggplot(data = full_data, aes(x = Latitude, y = zoopAbund)) +  
+  geom_point(data = zoo_north, colour = "grey", shape = 16) + 
+  geom_point(data = zoo_south, colour = "black", shape = 16) + 
+  geom_smooth(data = zoo_south, method = "lm", colour='red') +  
+  geom_smooth(data = zoo_north, method = "lm", colour='blue') +  
+  theme_classic() +   ylab("Log10(Zooplankton Abundance)") +  
+  theme(axis.text = element_text(colour = "black")) +   
+  ggtitle('Zooplankton Abundance Varying with Latitude in Different regions')
+```
+
+We do see two different relationships in the two different regions. This suggests we may want to use a non-linear model to represent our data.
+
+## Visualising Distribution of Data using Derived Indexed Dataset
+
+```{r}
+#Create a map of our data 
+
+  #extract world map as a 'simple feature' from rnaturealearth package
+world <- ne_countries(scale = "medium", returnclass = "sf") 
+
+  #add latitude and longitude ranges using the derived index dataset
+min_Long <- min(zoop.index$Longitude)
+max_Long <- max(zoop.index$Longitude)
+
+min_Lat <- min(zoop.index$Latitude)
+max_Lat <- max(zoop.index$Latitude)
+
+  #Plot sampling data onto our world map 
+ggplot() + 
+  geom_sf(data = world, colour = "grey70", fill = "grey70") +
+  geom_point(data = zoop.index, aes(x = Longitude, y = Latitude), size = 1.5, shape = 21, fill = "blue") +
+  ggtitle('Zooplankton CPR Sampling Distribution')+
+  scale_x_continuous(expand = c(0, 0), limits = c(min_Long, max_Long)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(min_Lat, max_Lat)) +
+  theme_classic() + 
+  theme(axis.text = element_text(colour = "black"))
+
+
+```
+
+### Temporal, Seasonal, Diurnal Ranges of the Data
+
+```{r}
+#with lubridata package split the UTC time into DateTime
+zoop.index <- zoop.index %>% 
+  mutate(DateTime = parse_date_time(SampleTime_UTC, 'ymd HMS'))# Tell R what format the date is in, and let it read it into the official format.
+
+  #also count the decimal hour
+zoop.index <- zoop.index %>% 
+  mutate(Hour = (hour(DateTime) + minute(DateTime) / 60)) # Calculate the decimal Hour
+
+  #Create plots to patch together in oone image to examine data distribution over year, month, and hour
+year <- ggplot(data = zoop.index, aes(x = Year_Local)) + 
+  geom_histogram(binwidth = 1)+
+  ggtitle('Years of Data')
+
+month <- ggplot(data = zoop.index, aes(x = Month_Local)) + 
+  geom_histogram(binwidth = 1)+
+  ggtitle('Months of Data')
+
+hour <- ggplot(data = zoop.index, aes(x = Hour)) + 
+  geom_histogram(binwidth = 1)+
+  ggtitle('Hours of Data')
+
+year/month/hour
+```
+
+Some trends we see - decrease in sampling during certain years, notably a decrease between 2019 and 2020 probably due to the COVID19 Pandemic. Also seems to be an increase in sampling in the summer months.
+
+## Copepod Diversity
+
+Using a new data set that has matched most of the derived index CPR data with environmental information from sampling, I want to examine if Copepod diversity increases or decreases towards the poles? Using Shannon's Diversity Index as a metric for species diversity will help answer this question. The figure below plots Shannon's Diversity Index vs. Latitude for copepod species. the blue line represents a trend line of a linear model to fit the data.
+
+The model depicts a significant positive relationship between Copepod richness and latitude (p \< 2.e-16, F = ) . Running a Pearson's correlation test returns a positive correlation on 0.56 (p\< 2e-16) between the two variables.
+
+correlation of sea surface temperature as a metric for latitude on Copepod diversity, similar to zooplankton abundance as above.
+
+```{r,warning=FALSE, message=FALSE}
+#read in the matched environmental data set
+envmt <- read_csv("https://raw.githubusercontent.com/HaydenSchilling/Example_code_and_data/master/IMOS_-_AusCPR%23_Zooplankton_Abundance-Derived_CPR_Indices.csv", na="-999")
+
+#testing if richness and SST correlate with Pearson's
+corr_out <- cor.test(envmt$SST_C, envmt$ShannonCopepodDiversity)
+rsquar <- as.numeric(corr_out$estimate) ^ 2
+corr_out
+rsquar
+```
+
+```{r, warning=FALSE, message=FALSE}
+#plot the Shannon's Diversity Index for Copepods vs. SST 
+ggplot(data = envmt, aes(x = SST_C, y = ShannonCopepodDiversity)) + 
+  geom_point() + 
+  scale_y_log10()+
+  theme_classic()+
+  geom_smooth(method='lm')+
+  ggtitle('Copepod Diversity Varying with SST')+
+  annotate(geom="text", x=1, y=100, label="R^2=0.315" )+ #adds linear model R-squared value
+  annotate(geom='text', x=5, y=100, label='p<2e-16') + #adds linear model p value 
+  annotate(geom='text', x=1, y=120, label='r=0.561')+ #adds correlation coefficient
+  annotate(geom='text', x=5, y=120, label='p<2e-16') #adds correlation test R-squared value
+```
+
+## Feeding Strategies
+
+Using the same matched environmental dataset, does the feeding strategy of copepods (carnivores vs. herbivores) change with latitude? From the column, HerbivoreCarnivoreCopepodRatio- A ratio of 1 indicates that only herbivorous copepods were present in a sample, and a ratio of 0 represents a sample with only carnivores.
+
+Results: From the violin plot, we see that for all temperatures, the ratio of herbivores to copepods is greater than 0.75. From 16C upwards, the ratio starts to decrease and more carnivorous individuals were found in the samples. In summation, as you increase in SST and decrease Latitude, there are more carnivorous copepods present, but on average there are more herbivores than carnivores in a sample.
+
+```{r, warning=FALSE, message=FALSE}
+#Creating a scatterplot
+ggplot(data = envmt, aes(x = SST_C, y = HerbivoreCarnivoreCopepodRatio)) +
+  geom_point()+
+  ggtitle('Scatterplot Copepod Feeding Strategy with SST')+
+  theme_bw()
+
+#Creating a violin plot
+
+  #Putting SST into bins of 2 degrees C. 
+envmt <- envmt %>%
+  mutate(rnd_SST = as.factor(2 * round(envmt$SST_C/ 2)))%>%
+    drop_na(rnd_SST)
+  
+ggplot(data = envmt, aes(x = rnd_SST, y = HerbivoreCarnivoreCopepodRatio)) +
+  geom_violin(scale = "width") + 
+  geom_boxplot(width = 0.3) +
+  theme_bw()+
+  ggtitle('Violin Plot Copepod Feeding Strategy with SST')
+```
+
+Now why may we see this pattern?
+
+Prey size and availability may impact copepod feeding strategy. Previous studies describe copepod body size decreasing with temperature and microzooplankton being more abundant at high latitudes (Brun et al. 2016; Prowe et al. 2018). Since zooplankton body size has been found to be associated with prey size, (Brun et al. 2016) smaller copepods at the poles may be more likely to feed on small phytoplankton making them herbivores, while larger individuals in the sub-tropics/tropics can eat larger prey items, like other zooplankton, and adopt a carnivorous feeding strategy.
+
+If there are more larger prey items towards the equator, then we would see more copepods that have adapted to feed on these, seeing more carnivores towards the equator and more herbivores near the poles.
+
+Why is this important: understanding feeding strategy - important to fisheries, biogeochemical cycles (C uptake by phytoplantkon), trophic transfer
+
+Brun, P., Payne, M. R., & Kiørboe, T. (2016). Trait biogeography of marine copepods–an analysis across scales. *Ecology Letters*, *19*(12), 1403-1413.
+
+Prowe, A. F., Visser, A. W., Andersen, K. H., Chiba, S., & Kiørboe, T. (2019). Biogeography of zooplankton feeding strategy. *Limnology and Oceanography*, *64*(2), 661-678.
+
+# Part 2: Patterns in Zooplankton from Australia National Reference Stations
+
+Overall, I'm curious if Australian National Reference Stations have distinctive larval fish communities from their zooplankton sampling.
+
+Here I perform an ordination plot of the larval fish community and environmental data from the IMOS National Reference Stations around Australia to answer three questions:
+
+1.  Are there different communities at the different stations? (i.e., can we sample fewer stations?)
+2.  If there are different communities, what environmental variables might structure these communities?
+
+## Reading in and Cleaning our Data
+
+```{r, warning=FALSE, message=FALSE}
+#data file subsetted from AODN
+rm(list = ls())
+
+data <- read_csv("https://raw.githubusercontent.com/HaydenSchilling/Example_code_and_data/master/IMOS%20Larval%20Fish%20TAMS.csv")
+
+#creating a subsetted data frame that only has columns for taxa/species counts, ensure every column has numerical data, and remove some taxa that were never present in the samples and do not have any counts 
+
+taxa <- data %>%
+  select(Acanthuridae_37437900:Phycidae_Gaidropsarus.spp_37226902)%>%
+  mutate_all(as.numeric)%>%
+  select_if(function(col) sum(col, na.rm=TRUE) !=0 )  #will return the sum of each column and select the column if the sum does not equal 0
+```
+
+## Map of Data
+
+Which National Reference Stations are we looking at samples from?
+
+```{r}
+#creating a simple figure map of Australia
+Aus <- ne_countries(country = "Australia", scale = "medium", returnclass = "sf")
+
+#dataframe with distinct stations
+dat_plot <- data %>% distinct(Station, .keep_all = TRUE)
+
+#plotting the stations of our Australia map
+ggplot(data = dat_plot, aes(x = Longitude, y = Latitude)) + 
+  geom_sf(data = Aus, inherit.aes = FALSE) + 
+  geom_point(colour = "blue") +  
+  geom_text_repel(aes(label = Station))
+```
+
+## Examining mean and variance 
+
+Abundances of several species across sites and measures of abiotic variables at sites can be dealt with using multivariate statistical approaches to answer ecological questions.
+
+Examining our data set further, the data does not have equal variance between species' counts. Species with very high mean abundances also have greater variance as shown from our mean-variance plot. This means we shouldn't use distance based approaches for a multivariate analysis. Instead we can use a model based approach using multivariate generalised linear models to investigate larval fish communities between sampling stations.
+
+```{r}
+#We can visualise the mean-variance relationship in our data by plotting the mean and variance of each species with the help of the mvabund library.
+
+# use the dataframe, taxa, with only fish counts, to create a Multivariate Abundance Data Object 
+fishy <- mvabund(taxa)
+
+#create a mean-variance plot for our multivariate abundance data
+meanvar.plot(fishy)
+
+```
+
+## Modelling and Visualising Larval Fish Communities between stations 
+
+We can visualise how similar Stations are based on their larval fish communities with a Model-Based Ordination plot using cord() to transform our multivariate abundance data. Running an ANOVA on our generalised linear model will determine if the larval fish communities were significantly different from station to station.
+
+Examining the plot below we determined that the communities were different from station to station based on the clustering of samples at each station. The p-value of the ANOVA for our model was 0.048, assuming a critical value of a=0.05, we can say that [YES]{.underline} - the larval communities are significantly different around Australia. At least for these 3 stations on the East Coast.
+
+```{r, warning=FALSE, message=FALSE}
+#fit a generalised linear model to larval fish abundance vs. NRS
+model1 <- manyglm(fishy ~ Station, data=data, offset=log(Volume_m3))
+
+
+#make a null model for plotting 
+mod1b <- manyglm(fishy~1, offset=log(data$Volume_m3))
+
+#usinc cord() from ecoCopula library allows us to visualise how samples(sites) and variables(taxa) are located along several latent variables(an unobserved envmtal gradient)
+fish_lv <- cord(mod1b)
+
+#extract values for filtering and plotting 
+Lv_scores <- as.data.frame(fish_lv$scores)
+Sp_loadings <- as.data.frame(fish_lv$loadings)
+Sp_loadings$Length <- sqrt(Sp_loadings$Factor1 ^ 2 + Sp_loadings$Factor2 ^ 2) # calculate vector length (Pythagoras' theorem)
+Sp_loadings$Species <- colnames(fishy)
+Sp_loadings_10 <- Sp_loadings %>% slice_max(order_by = Length, n = 10) # 10 longest vectors
+
+#running an ANOVA to see if our generalised linear model is significant 
+anova(model1, nBoot = 20)
+```
+
+```{r}
+#plotting
+Station <- ggplot() + 
+  geom_point(data = Lv_scores, aes(x = Factor1, y = Factor2, colour = data$Station)) + 
+  theme_classic() + 
+  scale_colour_viridis_d(name = "Station") +
+  xlab("Latent Variable 1") + 
+  ylab("Latent Variable 2") + 
+  ggtitle("Ordination Plot of Larval Fish Communities at NRS")+
+  theme(axis.text = element_text(colour = "black", size = 10))+
+  annotate('text', x=2, y=3, label='GLM: P=0.048')
+Station
+```
+
+### Temperature as a Covariate 
+
+We can colour sample points on our plot according to temperature rather than Station, to see how the larval fish community varies by Station with temperature as a co-variate.
+
+From clustering on the ordination plot, mirroring clustering of stations, and an ANOVA, temperature is significantly related to the distinct larval fish communities at the different National Reference Stations (p\<0.048).
+
+```{r, warning=FALSE, message=FALSE}
+#Colouring our ordination plot samples by temperature
+Temp_Station <- ggplot() + 
+  geom_point(data = Lv_scores, aes(x = Factor1, y = Factor2, colour = data$CTD_SST_C)) + 
+  theme_classic() + 
+  scale_colour_viridis_c('Temperature') +
+  xlab("Latent Variable 1") + 
+  ylab("Latent Variable 2") + 
+  ggtitle("Temperature as a Covariate")+
+  theme(axis.text = element_text(colour = "black", size = 10))
+
+Station / Temp_Station
+
+#is temperature significantly related?
+modelT <- manyglm(fishy ~ CTD_SST_C, data = data, offset = log(Volume_m3))
+
+anova(modelT, nBoot = 20)
+```
+
+### Which Taxa contribute the most to the differences between sites? 
+
+Using outputs from an ANOVA, we can calculate a percentage of likelihood ratio to see which taxa groups are driving the separation of sites. Species from the groups Lutjanidae, Carangidae, and Gobiidae seem to be the top 3 drivers of distinct communities between the stations. Looking at the ordination plot, Lutijanidae and Carangidae are causing the distinction of North Stradborke, and Port Hacking, communities, respectively.
+
+```{r}
+#going back to our Station model 
+out <- anova(model1, nBoot = 20, p.uni = "adjusted") # conduct anova 
+
+out2 <- as.data.frame(out$uni.test)
+
+out2 <- out2 %>% t() %>% as.data.frame()
+
+sum_of_likelihood <- sum(out2$Station)
+
+out2 <- out2 %>% 
+  mutate(Taxa = row.names(out2),
+         Percent_Contribution = Station / sum_of_likelihood * 100) %>%
+  arrange(desc(Percent_Contribution)) # sort to have the most important at the top
+
+## Check the percentages
+sum(out2$Percent_Contribution)
+
+out2[1:3, 2:4]
+
+#plot species vectors onto the ordination plot
+Station_Species <- ggplot() + 
+  geom_point(data = Lv_scores, aes(x = Factor1, y = Factor2, colour = data$Station)) + 
+  theme_classic() + 
+  scale_colour_viridis_d(name = "Station") +
+  xlab("Latent Variable 1") + 
+  ylab("Latent Variable 2") + 
+  ggtitle("Ordination Plot of Larval Fish Communities at NRS")+
+  theme(axis.text = element_text(colour = "black", size = 10))+
+  annotate('text', x=2, y=3, label='GLM: P=0.048')+
+  annotate("segment", x = rep(0, 10), xend = Sp_loadings_10$Factor1 * 5, y = rep(0, 10), yend = Sp_loadings_10$Factor2 * 5, colour = "red", linewidth = 1, alpha = 0.6, arrow = arrow()) +
+  geom_text_repel(aes(x = Sp_loadings_10$Factor1 * 5, y = Sp_loadings_10$Factor2 * 5, label = Sp_loadings_10$Species))
+
+Station_Species
+```
