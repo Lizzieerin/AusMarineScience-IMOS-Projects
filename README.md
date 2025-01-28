@@ -5,3 +5,9 @@ This repository showcases labs and projects completed during the course, Topics 
 ## Animal Tracking
 
 This project utilised data from the Australian Acoustic Telemetry Database, focusing on the detection of bullsharks around New South Wales, Australia. I investigated spatial and temporal trends of bullshark movement inside of Sydney Harbour, seasonal variation of detections along Australia's east coast, and possible intra-individual variation. 
+
+## Zooplankton Investigation 
+
+In this project I used data from zooplankton sampling from Continuous Plankton Recorders (CPR) around Australia and the Southern Ocean and sampling done at National Reference Stations. 
+With the CPR data I investigated, trends in zooplankton abundance, diversity, and feeding strategies, mainly interested in the relationship between these and Latitude or SST.
+Using data from 3 National Reference Stations, I used model-based ordination plots to determine if larval fish communities were different between the 3 stations and if any environmental covariates, or specific taxa, might be structuring these communities. 
